@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  DbPassword:
+    Type: String
+    Default: PASSWORD_GOES_HERE
+    NoEcho: true
+
+Resources:
+
+  # create VPC
+  RDSVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+        CidrBlock: 172.31.0.0/16
+        EnableDnsSupport: 'true'
+        EnableDnsHostnames: 'true'
+        Tags:
+        - Key: Name
+          Value: RDSVPC
+
+  # create lambda subnets
+  privateLambdaSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RDSVPC
+      CidrBlock: 172.31.32.0/20
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      Tags:
+      - Key: Name
+        Value: privateLambdaSubnet1
+
+  privateLambdaSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RDSVPC
+      CidrBlock: 172.31.48.0/20
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      Tags:
+      - Key: Name
+        Value: privateLambdaSubnet2
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CloudFormation managed DB subnet group.
+      SubnetIds:
+        - !Ref privateLambdaSubnet1
+        - !Ref privateLambdaSubnet2
+
+  # create security groups
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda ENIs
+      VpcId:
+        Ref: RDSVPC
+      Tags:
+      - Key: Name
+        Value: LambdaSecurityGroup
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Aurora access from lambda subnets
+      VpcId:
+        Ref: RDSVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '3306'
+        ToPort: '3306'
+        SourceSecurityGroupId : !Ref LambdaSecurityGroup
+      Tags:
+      - Key: Name
+        Value: RDSSecurityGroup
+
+  # create iam roles for lambda
+  TestFunctionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -  
+            Effect: "Allow"
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies: 
+        - 
+          PolicyName: "AllowInvoke"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: "Allow"
+                Action: "lambda:InvokeFunction"
+                Resource: "*"
+                  #- !GetAtt LambdaRDSManageConnections.Arn
+                  #- !GetAtt LambdaRDSTest.Arn
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+
+  # create lambda
+  TestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs8.10
+      Role: !GetAtt TestFunctionRole.Arn
+      VpcConfig: # For accessing RDS instance
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref privateLambdaSubnet1  
+          - !Ref privateLambdaSubnet2
+      Environment:
+        Variables: 
+          S3_BUCKET: ts-serverless-app
+          AURORADB_INSTANCE_ADDRESS: !GetAtt TestDBCluster.Endpoint.Address
+          AURORADB_INSTANCE_PORT: !GetAtt TestDBCluster.Endpoint.Port
+
+  # create aurora serverless cluster
+  TestDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      MasterUsername: admin
+      MasterUserPassword: !Ref DbPassword
+      Engine: aurora
+      EngineMode: serverless
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+
+Outputs:
+  TestDBClusterAddress:
+    Description: Address to connect to the aurora db
+    Value:
+      Fn::GetAtt:
+        - TestDBCluster
+        - Endpoint.Address
+  TestDBClusterPort:
+    Description: Port number to connect to the aurora db
+    Value:
+      Fn::GetAtt:
+        - TestDBCluster
+        - Endpoint.Port
+  
